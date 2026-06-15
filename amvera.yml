@@ -1,0 +1,9 @@
+service:
+  name: family-bot
+  type: bot
+
+run:
+  command: python bot.py
+
+dependencies:
+  - ffmpeg
