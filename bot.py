@@ -5,14 +5,18 @@ from datetime import datetime
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
-import google.generativeai as genai
+from openai import OpenAI
+import speech_recognition as sr
 
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 
-genai.configure(api_key=GEMINI_API_KEY, transport="rest")
-model = genai.GenerativeModel("gemini-1.5-flash")
+# Клиент DeepSeek (бесплатные токены при регистрации)
+deepseek = OpenAI(
+    api_key=DEEPSEEK_API_KEY,
+    base_url="https://api.deepseek.com"
+)
 
 daily_messages = {}
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -68,19 +72,26 @@ async def collect_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         voice = message.voice
         file = await context.bot.get_file(voice.file_id)
         
+        # Скачиваем в ogg
         with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
             await file.download_to_drive(tmp.name)
-            tmp_path = tmp.name
+            ogg_path = tmp.name
         
-        audio_file = genai.upload_file(tmp_path, mime_type="audio/ogg")
-        response = model.generate_content([
-            "Расшифруй это голосовое сообщение на русском языке. Верни ТОЛЬКО текст, без пояснений.",
-            audio_file
-        ])
+        # Конвертируем в wav через ffmpeg
+        wav_path = ogg_path.replace(".ogg", ".wav")
+        os.system(f"ffmpeg -i {ogg_path} -ac 1 -ar 16000 {wav_path} -y 2>/dev/null")
         
-        os.unlink(tmp_path)
+        # Расшифровываем через speech_recognition (Google Web Speech API, бесплатно)
+        recognizer = sr.Recognizer()
+        with sr.AudioFile(wav_path) as source:
+            audio = recognizer.record(source)
         
-        text = response.text.strip()
+        text = recognizer.recognize_google(audio, language="ru-RU")
+        
+        # Чистим временные файлы
+        os.unlink(ogg_path)
+        os.unlink(wav_path)
+        
         if text:
             if msg_date not in daily_messages:
                 daily_messages[msg_date] = []
@@ -120,13 +131,21 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 """
     
     try:
-        response = model.generate_content(prompt)
-        summary = response.text
+        response = deepseek.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": "Ты остроумный семейный рассказчик."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.9,
+            max_tokens=600
+        )
+        summary = response.choices[0].message.content
         await update.message.reply_text(f"📰 Срочный выпуск семейных новостей:\n\n{summary}")
         logging.info("✅ Сводка отправлена")
     
     except Exception as e:
-        logging.error(f"Ошибка генерации: {e}")
+        logging.error(f"Ошибка DeepSeek: {e}")
         await update.message.reply_text("🔮 Хрустальный шар запотел. Попробуйте позже.")
 
 
